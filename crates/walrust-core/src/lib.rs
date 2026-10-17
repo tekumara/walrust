@@ -13,6 +13,7 @@
 pub mod errors;
 pub mod external_delta;
 pub mod ltx;
+pub mod replay;
 pub mod replay_sink;
 pub mod replicator;
 pub mod shadow;
@@ -35,6 +36,7 @@ pub use hadb_io::{RetryConfig, RetryPolicy};
 pub use hadb_io::s3;
 
 // Re-export walrust-specific types
+pub use replay::{pull_incremental_with_cursor, ReplayCursor, ReplayGeneration, ReplayPolicy};
 pub use replay_sink::PageReplaySink;
 pub use replicator::Replicator;
 pub use snapshot_source::SnapshotSource;

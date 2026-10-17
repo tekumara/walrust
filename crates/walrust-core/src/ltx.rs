@@ -71,6 +71,14 @@ pub struct DecodeResult {
 ///
 /// Returns the header and checksum for chain tracking.
 pub fn decode_to_db(data: &[u8], output_path: &Path) -> Result<DecodeResult> {
+    let (image, result) = decode_snapshot_image(data)?;
+    std::fs::write(output_path, image)?;
+    Ok(result)
+}
+
+/// Decode without installing so cursor-aware replay can verify a complete batch
+/// (including snapshots) before writing any of it.
+pub(crate) fn decode_snapshot_image(data: &[u8]) -> Result<(Vec<u8>, DecodeResult)> {
     let changeset =
         physical::decode(data).map_err(|e| anyhow!("Failed to decode HADBP changeset: {}", e))?;
 
@@ -113,8 +121,6 @@ pub fn decode_to_db(data: &[u8], output_path: &Path) -> Result<DecodeResult> {
         db_data[start..end].copy_from_slice(&page.data);
     }
 
-    std::fs::write(output_path, &db_data)?;
-
     // Verify actual checksum matches what was computed
     let actual_checksum = compute_db_checksum_raw(&db_data);
     tracing::debug!(
@@ -123,10 +129,13 @@ pub fn decode_to_db(data: &[u8], output_path: &Path) -> Result<DecodeResult> {
         actual_checksum
     );
 
-    Ok(DecodeResult {
-        header: changeset.header,
-        checksum: actual_checksum,
-    })
+    Ok((
+        db_data,
+        DecodeResult {
+            header: changeset.header,
+            checksum: actual_checksum,
+        },
+    ))
 }
 
 /// Result of applying an HADBP changeset to an existing database.

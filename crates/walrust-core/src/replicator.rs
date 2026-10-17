@@ -420,15 +420,34 @@ impl Replicator {
     /// Returns `Ok(Some(txid))` if data was found and restored,
     /// `Ok(None)` if no WAL data exists for this name.
     pub async fn restore(&self, name: &str, output_path: &Path) -> Result<Option<u64>> {
+        Ok(self
+            .restore_with_cursor(name, output_path)
+            .await?
+            .map(|cursor| cursor.seq))
+    }
+
+    /// Restore with the exact checksum/generation receipt needed for live replay.
+    pub async fn restore_with_cursor(
+        &self,
+        name: &str,
+        output_path: &Path,
+    ) -> Result<Option<crate::ReplayCursor>> {
         let prefix = self.prefix.clone();
 
         if let Some(parent) = output_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        let seq = match sync::restore(self.storage.as_ref(), &prefix, name, output_path, None).await
+        let cursor = match sync::restore_with_cursor(
+            self.storage.as_ref(),
+            &prefix,
+            name,
+            output_path,
+            None,
+        )
+        .await
         {
-            Ok(seq) => seq,
+            Ok(cursor) => cursor,
             Err(e) if e.to_string().contains("No snapshot found") => return Ok(None),
             Err(e) => return Err(e),
         };
@@ -436,10 +455,10 @@ impl Replicator {
         tracing::info!(
             "Replicator: restored '{}' to seq {} ({})",
             name,
-            seq,
+            cursor.seq,
             output_path.display()
         );
-        Ok(Some(seq))
+        Ok(Some(cursor))
     }
 
     /// Flush pending WAL frames for a specific database to S3.

@@ -958,6 +958,21 @@ pub async fn restore(
     output: &Path,
     _point_in_time: Option<&str>,
 ) -> Result<u64> {
+    Ok(
+        restore_with_cursor(storage, prefix, db_name, output, _point_in_time)
+            .await?
+            .seq,
+    )
+}
+
+/// Restore and retain the sequence, generation and checksum of the bytes applied.
+pub async fn restore_with_cursor(
+    storage: &dyn StorageBackend,
+    prefix: &str,
+    db_name: &str,
+    output: &Path,
+    _point_in_time: Option<&str>,
+) -> Result<crate::ReplayCursor> {
     // Find latest snapshot
     let snapshot =
         cs_storage::discover_latest_snapshot(storage, prefix, db_name, ChangesetKind::Physical)
@@ -992,8 +1007,14 @@ pub async fn restore(
         decode_result.checksum
     );
 
-    let mut restored_seq = snapshot.seq;
-    let mut current_checksum = decode_result.checksum;
+    if decode_result.header.seq != snapshot.seq {
+        anyhow::bail!("snapshot key/header seq mismatch at {}", snapshot.key);
+    }
+    let mut cursor = crate::ReplayCursor {
+        seq: snapshot.seq,
+        checksum: decode_result.checksum,
+        generation: crate::ReplayGeneration::Snapshot,
+    };
 
     // Apply incrementals in order. If a checksum chain doesn't match,
     // it's from a previous lineage (e.g., a prior leader). Stop applying.
@@ -1002,15 +1023,34 @@ pub async fn restore(
             .get(&inc.key)
             .await?
             .ok_or_else(|| anyhow!("incremental key {} not found", inc.key))?;
-        match ltx::apply_changeset_to_db(&data, output, current_checksum) {
+        if inc.seq
+            != cursor
+                .seq
+                .checked_add(1)
+                .ok_or_else(|| anyhow!("replay sequence overflow"))?
+        {
+            anyhow::bail!(
+                "non-contiguous changeset: expected seq {}, found {}",
+                cursor.seq + 1,
+                inc.seq
+            );
+        }
+        let changeset = hadb_changeset::physical::decode(&data)?;
+        if changeset.header.seq != inc.seq {
+            anyhow::bail!("changeset key/header seq mismatch at {}", inc.key);
+        }
+        match ltx::apply_changeset_to_db(&data, output, cursor.checksum) {
             Ok(result) => {
                 tracing::info!(
                     "Applied incremental (seq {}, checksum: {:016x})",
                     inc.seq,
                     result.checksum
                 );
-                restored_seq = inc.seq;
-                current_checksum = result.checksum;
+                cursor = crate::ReplayCursor {
+                    seq: inc.seq,
+                    checksum: result.checksum,
+                    generation: crate::ReplayGeneration::Incremental,
+                };
             }
             Err(e) if e.to_string().contains("Checksum chain broken") => {
                 tracing::info!(
@@ -1028,7 +1068,7 @@ pub async fn restore(
         }
     }
 
-    Ok(restored_seq)
+    Ok(cursor)
 }
 
 /// Restore using an external snapshot source (e.g., turbolite page groups).
